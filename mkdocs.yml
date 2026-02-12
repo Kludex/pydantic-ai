@@ -82,6 +82,7 @@ nav:
           - Metrics & Attributes: evals/how-to/metrics-attributes.md
       - Examples:
           - Simple Validation: evals/examples/simple-validation.md
+      - TypeScript Port: evals-ts.md
 
   - Pydantic Graph:
       - Overview: graph.md
