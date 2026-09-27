@@ -1,0 +1,107 @@
+name: Benchmark test sharding
+
+on:
+  push:
+    branches: [bench/unsharded-ci-20260927]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  COLUMNS: 150
+  CI: "true"
+  UV_PYTHON: "3.10"
+  UV_FROZEN: "1"
+  UV_PYTHON_PREFERENCE: only-managed
+  BLOCKBUSTER_ENABLED: "false"
+  GIT_CONFIG_COUNT: "1"
+  GIT_CONFIG_KEY_0: url.https://x-access-token:${{ github.token }}@github.com/.insteadOf
+  GIT_CONFIG_VALUE_0: https://github.com/
+
+jobs:
+  benchmark:
+    name: trial ${{ matrix.trial }}, group ${{ matrix.group }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        trial: [1, 2, 3]
+        group: [0, 1, 2]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: "0.12.15"
+          python-version: "3.10"
+          enable-cache: false
+
+      - name: Record runner and install locked dependencies
+        run: |
+          mkdir -p "$RUNNER_TEMP/results" .coverage
+          lscpu > "$RUNNER_TEMP/results/cpu.txt"
+          git rev-parse HEAD > "$RUNNER_TEMP/results/commit.txt"
+          /usr/bin/time -v -o "$RUNNER_TEMP/results/install-time.txt" \
+            uv sync --all-extras --no-extra mcp-tasks
+          uv pip freeze > "$RUNNER_TEMP/results/packages.txt"
+
+      - name: Prepare the same model cache on every runner
+        run: |
+          uv run --no-sync python -c "from huggingface_hub import snapshot_download; from sentence_transformers import SentenceTransformer; snapshot_download('sentence-transformers-testing/stsb-bert-tiny-safetensors', revision='f3cb857cba53019a20df283396bcca179cf051a4'); SentenceTransformer('sentence-transformers-testing/stsb-bert-tiny-safetensors', revision='f3cb857cba53019a20df283396bcca179cf051a4')"
+
+      - name: Measure first test run
+        env:
+          GROUP: ${{ matrix.group }}
+          COVERAGE_PROCESS_START: ./pyproject.toml
+          COVERAGE_FILE: .coverage/.coverage.first
+        run: |
+          split=()
+          if [[ "$GROUP" != 0 ]]; then split=(--splits 2 --group "$GROUP"); fi
+          /usr/bin/time -v -o "$RUNNER_TEMP/results/first-time.txt" \
+            uv run --no-sync coverage run -m pytest --durations=100 -n logical --dist=loadgroup \
+              --ignore=tests/durable_exec "${split[@]}" --junitxml="$RUNNER_TEMP/results/first.xml" \
+              2>&1 | tee "$RUNNER_TEMP/results/first.log"
+
+      - name: Measure warm test run
+        env:
+          GROUP: ${{ matrix.group }}
+          COVERAGE_PROCESS_START: ./pyproject.toml
+          COVERAGE_FILE: .coverage/.coverage.warm
+        run: |
+          split=()
+          if [[ "$GROUP" != 0 ]]; then split=(--splits 2 --group "$GROUP"); fi
+          /usr/bin/time -v -o "$RUNNER_TEMP/results/warm-time.txt" \
+            uv run --no-sync coverage run -m pytest --durations=100 -n logical --dist=loadgroup \
+              --ignore=tests/durable_exec "${split[@]}" --junitxml="$RUNNER_TEMP/results/warm.xml" \
+              2>&1 | tee "$RUNNER_TEMP/results/warm.log"
+
+      - name: Profile the slow docs example without coverage
+        if: matrix.group == 0 && matrix.trial == 1
+        run: |
+          uv run --no-sync python -m cProfile -o "$RUNNER_TEMP/results/example.pstats" -m pytest \
+            'tests/test_examples.py::test_docs_examples[docs/evals/how-to/concurrency.md:149]' \
+            --durations=10 2>&1 | tee "$RUNNER_TEMP/results/example.log"
+          uv run --no-sync python -c "import os, pstats; pstats.Stats(os.environ['RUNNER_TEMP'] + '/results/example.pstats').strip_dirs().sort_stats('cumulative').print_stats(80)" \
+            > "$RUNNER_TEMP/results/example-profile.txt"
+
+      - name: Profile collection without coverage
+        if: matrix.group == 0 && matrix.trial == 1
+        run: |
+          /usr/bin/time -v -o "$RUNNER_TEMP/results/collection-time.txt" \
+            uv run --no-sync python -X importtime -m pytest --collect-only -q --ignore=tests/durable_exec \
+              > "$RUNNER_TEMP/results/collection.txt" 2> "$RUNNER_TEMP/results/imports.txt"
+
+      - name: Upload benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sharding-trial-${{ matrix.trial }}-group-${{ matrix.group }}
+          path: ${{ runner.temp }}/results
+          retention-days: 7
