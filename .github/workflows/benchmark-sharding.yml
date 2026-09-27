@@ -1,4 +1,4 @@
-name: Benchmark test sharding
+name: Benchmark unsharded bytecode compilation
 
 on:
   push:
@@ -31,7 +31,7 @@ jobs:
       fail-fast: false
       matrix:
         trial: [1, 2, 3]
-        group: [0, 1, 2]
+        group: [0]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -49,7 +49,7 @@ jobs:
           lscpu > "$RUNNER_TEMP/results/cpu.txt"
           git rev-parse HEAD > "$RUNNER_TEMP/results/commit.txt"
           /usr/bin/time -v -o "$RUNNER_TEMP/results/install-time.txt" \
-            uv sync --all-extras --no-extra mcp-tasks
+            uv sync --all-extras --no-extra mcp-tasks --compile-bytecode
           uv pip freeze > "$RUNNER_TEMP/results/packages.txt"
 
       - name: Prepare the same model cache on every runner
@@ -68,35 +68,6 @@ jobs:
             uv run --no-sync coverage run -m pytest --durations=100 -n logical --dist=loadgroup \
               --ignore=tests/durable_exec "${split[@]}" --junitxml="$RUNNER_TEMP/results/first.xml" \
               2>&1 | tee "$RUNNER_TEMP/results/first.log"
-
-      - name: Measure warm test run
-        env:
-          GROUP: ${{ matrix.group }}
-          COVERAGE_PROCESS_START: ./pyproject.toml
-          COVERAGE_FILE: .coverage/.coverage.warm
-        run: |
-          split=()
-          if [[ "$GROUP" != 0 ]]; then split=(--splits 2 --group "$GROUP"); fi
-          /usr/bin/time -v -o "$RUNNER_TEMP/results/warm-time.txt" \
-            uv run --no-sync coverage run -m pytest --durations=100 -n logical --dist=loadgroup \
-              --ignore=tests/durable_exec "${split[@]}" --junitxml="$RUNNER_TEMP/results/warm.xml" \
-              2>&1 | tee "$RUNNER_TEMP/results/warm.log"
-
-      - name: Profile the slow docs example without coverage
-        if: matrix.group == 0 && matrix.trial == 1
-        run: |
-          uv run --no-sync python -m cProfile -o "$RUNNER_TEMP/results/example.pstats" -m pytest \
-            'tests/test_examples.py::test_docs_examples[docs/evals/how-to/concurrency.md:149]' \
-            --durations=10 2>&1 | tee "$RUNNER_TEMP/results/example.log"
-          uv run --no-sync python -c "import os, pstats; pstats.Stats(os.environ['RUNNER_TEMP'] + '/results/example.pstats').strip_dirs().sort_stats('cumulative').print_stats(80)" \
-            > "$RUNNER_TEMP/results/example-profile.txt"
-
-      - name: Profile collection without coverage
-        if: matrix.group == 0 && matrix.trial == 1
-        run: |
-          /usr/bin/time -v -o "$RUNNER_TEMP/results/collection-time.txt" \
-            uv run --no-sync python -X importtime -m pytest --collect-only -q --ignore=tests/durable_exec \
-              > "$RUNNER_TEMP/results/collection.txt" 2> "$RUNNER_TEMP/results/imports.txt"
 
       - name: Upload benchmark evidence
         if: always()
