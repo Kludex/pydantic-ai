@@ -23,6 +23,8 @@ env:
   GIT_CONFIG_COUNT: "1"
   GIT_CONFIG_KEY_0: url.https://x-access-token:${{ github.token }}@github.com/.insteadOf
   GIT_CONFIG_VALUE_0: https://github.com/
+  # Fork-only validation pin; use an upstream release before adopting this workflow.
+  TESTMON_PACKAGE: "git+https://github.com/Kludex/pytest-testmon@574bf98677878e42007abd2aaa232ebb77c3edd7"
 
 permissions:
   contents: read
@@ -264,22 +266,14 @@ jobs:
           UV_NO_SYNC: "1"
 
       # Run inside `quality checks`, which finishes several minutes before the test/coverage critical path.
-      - name: Check public API compatibility with the latest release
+      - name: Check public API compatibility with the validation baseline release
         env:
           GH_TOKEN: ${{ github.token }}
           UV_NO_SYNC: "1"
         run: |
-          # Exclude the tag being built: once its GitHub release exists, `gh release view`
-          # would otherwise compare the release to itself and make this gate a no-op.
-          release_tag=$(gh release list --repo pydantic/pydantic-ai --limit 20 \
-            --exclude-drafts --exclude-pre-releases --json tagName \
-            | jq -r --arg current "$GITHUB_REF_NAME" \
-              'map(select(.tagName != $current))[0].tagName // empty')
-          if [ -z "$release_tag" ]; then
-            echo '::error::Could not find a prior stable release for the API compatibility baseline.'
-            exit 1
-          fi
-          git fetch --depth=1 origin tag "$release_tag"
+          # This historical validation branch follows v2.42.0; the fork lacks upstream tags.
+          release_tag=v2.42.0
+          git fetch --depth=1 https://github.com/pydantic/pydantic-ai.git tag "$release_tag"
           uv run python .github/scripts/check_api_compatibility.py --against "$release_tag"
 
       - run: uv build --all-packages --no-sources
@@ -439,6 +433,15 @@ jobs:
 
       - run: uv sync --only-dev
 
+      - name: cache incremental coverage
+        if: env.COLLECT_COVERAGE == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .testmon-cache
+          key: testmon-v1-${{ runner.os }}-${{ matrix.python-version }}-${{ matrix.install.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            testmon-v1-${{ runner.os }}-${{ matrix.python-version }}-${{ matrix.install.name }}-
+
       # Cache only the immutable model used by `TestSentenceTransformers`. The old
       # shared HF cache could be populated first by a matrix job that never downloaded
       # this model, permanently turning an exact cache hit into a cold model cache.
@@ -504,12 +507,17 @@ jobs:
         run: |
           if [[ "$COLLECT_COVERAGE" == "true" ]]; then
             export COVERAGE_PROCESS_START=./pyproject.toml
-            runner=(coverage run -m pytest)
+            uv run ${{ matrix.install.command }} python -c 'pass'
+            uv pip install --python .venv/bin/python --no-deps "$TESTMON_PACKAGE"
+            uv_extra=(--no-sync)
+            runner=(python -m testmon.incremental_coverage --cache .testmon-cache/.coverage --no-report \
+              --output "$COVERAGE_FILE.testmon" --)
           else
             unset COVERAGE_PROCESS_START
+            uv_extra=()
             runner=(pytest)
           fi
-          uv run ${{ matrix.install.command }} "${runner[@]}" --durations=100 -n logical --dist=loadgroup \
+          uv run ${{ matrix.install.command }} "${uv_extra[@]}" "${runner[@]}" --durations=100 -n logical --dist=loadgroup \
             --ignore=tests/durable_exec
         env:
           COVERAGE_FILE: .coverage/.coverage.${{ matrix.python-version }}-${{ matrix.install.name }}
@@ -595,6 +603,15 @@ jobs:
 
       - run: mkdir .coverage
 
+      - name: cache incremental coverage
+        if: env.COLLECT_COVERAGE == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .testmon-cache
+          key: testmon-v1-${{ runner.os }}-${{ matrix.python-version }}-durable-exec-${{ matrix.resolution }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            testmon-v1-${{ runner.os }}-${{ matrix.python-version }}-durable-exec-${{ matrix.resolution }}-
+
       # The Temporal tests download the dev-server binary on first use (see `temporal_env` in
       # tests/durable_exec/temporal/conftest.py); cache it so a CDN hiccup can't fail the suite at setup (#5399).
       # Separate key per resolution: the lowest leg may resolve a different temporalio version
@@ -624,13 +641,18 @@ jobs:
         run: |
           if [[ "$COLLECT_COVERAGE" == "true" ]]; then
             export COVERAGE_PROCESS_START=./pyproject.toml
-            runner=(coverage run -m pytest)
+            uv run ${{ matrix.resolution == 'lowest' && '--no-sync' || '--all-extras --no-extra mcp-tasks' }} \
+              python -c 'pass'
+            uv pip install --python .venv/bin/python --no-deps "$TESTMON_PACKAGE"
+            uv_run=(--no-sync)
+            runner=(python -m testmon.incremental_coverage --cache .testmon-cache/.coverage --no-report \
+              --output "$COVERAGE_FILE.testmon" --)
           else
             unset COVERAGE_PROCESS_START
+            uv_run=(${{ matrix.resolution == 'lowest' && '--no-sync' || '--all-extras --no-extra mcp-tasks' }})
             runner=(pytest)
           fi
-          uv run ${{ matrix.resolution == 'lowest' && '--no-sync' || '--all-extras --no-extra mcp-tasks' }} \
-            "${runner[@]}" --durations=20 -n logical --dist=loadgroup tests/durable_exec
+          uv run "${uv_run[@]}" "${runner[@]}" --durations=20 -n logical --dist=loadgroup tests/durable_exec
         env:
           COVERAGE_FILE: .coverage/.coverage.${{ matrix.python-version }}-durable-exec-${{ matrix.resolution }}
 
@@ -694,6 +716,15 @@ jobs:
 
       - run: mkdir .coverage
 
+      - name: cache incremental coverage
+        if: env.COLLECT_COVERAGE == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .testmon-cache
+          key: testmon-v1-${{ runner.os }}-${{ matrix.python-version }}-lowest-versions-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            testmon-v1-${{ runner.os }}-${{ matrix.python-version }}-lowest-versions-
+
       - name: restore sentence-transformers test model
         id: sentence-transformers-cache
         if: matrix.python-version != '3.14'
@@ -743,7 +774,9 @@ jobs:
         run: |
           if [[ "$COLLECT_COVERAGE" == "true" ]]; then
             export COVERAGE_PROCESS_START=./pyproject.toml
-            runner=(coverage run -m pytest)
+            uv pip install --python .venv/bin/python --no-deps "$TESTMON_PACKAGE"
+            runner=(python -m testmon.incremental_coverage --cache .testmon-cache/.coverage --no-report \
+              --output "$COVERAGE_FILE.testmon" --)
           else
             unset COVERAGE_PROCESS_START
             runner=(pytest)
