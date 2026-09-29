@@ -266,22 +266,14 @@ jobs:
           UV_NO_SYNC: "1"
 
       # Run inside `quality checks`, which finishes several minutes before the test/coverage critical path.
-      - name: Check public API compatibility with the latest release
+      - name: Check public API compatibility with the validation baseline release
         env:
           GH_TOKEN: ${{ github.token }}
           UV_NO_SYNC: "1"
         run: |
-          # Exclude the tag being built: once its GitHub release exists, `gh release view`
-          # would otherwise compare the release to itself and make this gate a no-op.
-          release_tag=$(gh release list --repo pydantic/pydantic-ai --limit 20 \
-            --exclude-drafts --exclude-pre-releases --json tagName \
-            | jq -r --arg current "$GITHUB_REF_NAME" \
-              'map(select(.tagName != $current))[0].tagName // empty')
-          if [ -z "$release_tag" ]; then
-            echo '::error::Could not find a prior stable release for the API compatibility baseline.'
-            exit 1
-          fi
-          git fetch --depth=1 origin tag "$release_tag"
+          # This historical validation branch follows v2.42.0; the fork lacks upstream tags.
+          release_tag=v2.42.0
+          git fetch --depth=1 https://github.com/pydantic/pydantic-ai.git tag "$release_tag"
           uv run python .github/scripts/check_api_compatibility.py --against "$release_tag"
 
       - run: uv build --all-packages --no-sources
